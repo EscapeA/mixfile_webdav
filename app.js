@@ -1,113 +1,120 @@
-import {v2 as webdav} from 'webdav-server'
+import { v2 as webdav } from 'webdav-server';
 import axios from "axios";
-import {decodeMixFile} from "./utils.js";
-import {API_BASE, SERVER_PORT} from "./config.js";
+import { decodeMixFile } from "./utils.js";
+import { API_BASE, SERVER_PORT, USERNAME,PASSWORD } from "./config.js";
 
+const userManager = new webdav.SimpleUserManager();
+const user = userManager.addUser(USERNAME, PASSWORD, false);
+const privilegeManager = new webdav.SimplePathPrivilegeManager();
+privilegeManager.setRights(user, '/', ['all']);
 
 const server = new webdav.WebDAVServer({
     port: SERVER_PORT,
-    autoSave: { // Will automatically save the changes in the 'webdav.dat' file
+    autoSave: { 
         treeFilePath: 'wevdav.dat'
-    }
+    },
+    httpAuthentication: new webdav.HTTPBasicAuthentication(userManager, 'Default realm'),
+    privilegeManager,
 });
+
 try {
-    await server.autoLoadAsync()
+    await server.autoLoadAsync();
 } catch (e) {
+    console.log(e);
 }
 
-const system = server.rootFileSystem()
+const system = server.rootFileSystem();
 
-const originOpenRead = system._openReadStream
+const originOpenRead = system._openReadStream;
 
 async function readText(readable) {
     let result = '';
     for await (const chunk of readable) {
         result += chunk;
     }
-    return result
+    return result;
 }
 
 system._openReadStream = function (...args) {
-    const [path, context, callback] = args
-    const serverResponse = context.context.response
-    const method = context.context.request.method
+    const [path, context, callback] = args;
+    const serverResponse = context.context.response;
+    const method = context.context.request.method;
     if (method === 'GET') {
         args[2] = async function (...args) {
             try {
-                const [, readable] = args
-                let shareCode = await readText(readable)
-                const clientHeaders = context.context.request.headers
+                const [, readable] = args;
+                let shareCode = await readText(readable);
+                const clientHeaders = context.context.request.headers;
                 const response = await client.get(`download?s=${shareCode}`, {
                     responseType: 'stream',
                     headers: {
                         range: clientHeaders.range
                     }
-                })
-                const mixHeaders = response.headers
-                serverResponse.statusCode = response.status
+                });
+                const mixHeaders = response.headers;
+                serverResponse.statusCode = response.status;
                 for (const key in mixHeaders) {
-                    serverResponse.setHeader(key, mixHeaders[key])
+                    serverResponse.setHeader(key, mixHeaders[key]);
                 }
-                serverResponse.setHeader('x-mix-code', shareCode)
-                await response.data.pipe(serverResponse)
+                serverResponse.setHeader('x-mix-code', shareCode);
+                await response.data.pipe(serverResponse);
             } catch (e) {
-                console.log(e)
+                console.log(e);
             }
         }
     }
-    return originOpenRead.apply(system, args)
+    return originOpenRead.apply(system, args);
 }
 
-const oOpenWrite = system._openWriteStream
+const oOpenWrite = system._openWriteStream;
 
-const oSize = system._size
+const oSize = system._size;
 
 system._size = function (...args) {
-    const [path, context, callback] = args
-    const method = context.context.request.method
+    const [path, context, callback] = args;
+    const method = context.context.request.method;
     if (method === 'PROPFIND') {
         originOpenRead.apply(system, [path, context, async (_, readable) => {
-            const code = await readText(readable)
-            const size = decodeMixFile(code)?.s ?? 0
-            callback(null, size)
-        }])
-        return
+            const code = await readText(readable);
+            const size = decodeMixFile(code)?.s ?? 0;
+            callback(null, size);
+        }]);
+        return;
     }
-    return oSize.apply(system, args)
+    return oSize.apply(system, args);
 }
 
 const client = await axios.create({
     baseURL: API_BASE,
     timeout: 1000 * 60 * 60 * 24
-})
+});
 
 system._openWriteStream = function (...args) {
-    const [path, context, callback] = args
-    const fileSize = context.estimatedSize
-    const fileName = path.paths.at(-1)
-    const readStream = context.context.request
-    const method = context.context.request.method
+    const [path, context, callback] = args;
+    const fileSize = context.estimatedSize;
+    const fileName = path.paths.at(-1);
+    const readStream = context.context.request;
+    const method = context.context.request.method;
     if (method === 'PUT') {
         args[2] = async function (...args) {
             try {
-                const [, writable] = args
+                const [, writable] = args;
                 const response = await client.put(`upload?name=${fileName}`, readStream, {
                     headers: {
                         "Content-Length": fileSize
                     }
-                })
-                const shareCode = response.data
-                writable.write(shareCode)
-                callback(...args)
-                console.log(`文件上传成功: ${shareCode}`)
+                });
+                const shareCode = response.data;
+                writable.write(shareCode);
+                callback(...args);
+                console.log(`文件上传成功: ${shareCode}`);
             } catch (e) {
-                console.log(e)
+                console.log(e);
             }
         }
     }
-    return oOpenWrite.apply(system, args)
+    return oOpenWrite.apply(system, args);
 }
-
 
 server.start(httpServer => {
     console.log('MixFileWebDAV已启动: ' + httpServer.address().port);
